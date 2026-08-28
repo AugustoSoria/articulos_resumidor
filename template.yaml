@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Resumidor de articulos con IA - backend (fase 1)
+
+Parameters:
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-haiku-4-5
+    Description: ID de Bedrock. Lleva prefijo "anthropic."; un ID first-party pelado da 400.
+  BedrockRegion:
+    Type: String
+    Default: us-east-1
+    Description: Region donde esta habilitado el modelo (puede diferir de la del stack).
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    # API Gateway corta a los 30 s. Un timeout de Lambda mas alto no sirve de
+    # nada en un flujo sincrono: el cliente ya recibio el 504.
+    Timeout: 29
+    # jsdom parsea el DOM entero en memoria; con menos que esto el parseo se
+    # arrastra, porque la CPU en Lambda escala con la memoria asignada.
+    MemorySize: 1024
+
+Resources:
+  TablaResumenes:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-resumenes"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  FuncionResumir:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TablaResumenes
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          BEDROCK_REGION: !Ref BedrockRegion
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TablaResumenes
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: !Sub "arn:aws:bedrock:${BedrockRegion}::foundation-model/${BedrockModelId}*"
+      Events:
+        Resumir:
+          Type: HttpApi
+          Properties:
+            Path: /resumir
+            Method: POST
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Format: cjs
+        Target: node22
+        Minify: false
+        Sourcemap: true
+        EntryPoints:
+          - src/handler.ts
+        # jsdom tiene dependencias nativas opcionales que no instalamos; sin
+        # marcarlas como externas, esbuild falla al no poder resolverlas.
+        External:
+          - canvas
+          - bufferutil
+          - utf-8-validate
+
+Outputs:
+  UrlApi:
+    Description: Endpoint POST para resumir un articulo
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/resumir"
+  NombreTabla:
+    Value: !Ref TablaResumenes
