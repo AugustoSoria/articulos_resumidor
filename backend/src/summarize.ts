@@ -1,4 +1,4 @@
-import { AnthropicBedrockMantle } from "@anthropic-ai/bedrock-sdk";
+import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import { config } from "./config";
 import type { Articulo } from "./types";
 
@@ -9,8 +9,12 @@ import type { Articulo } from "./types";
  *
  * Las credenciales las resuelve el SDK de AWS solo (rol de ejecucion en Lambda,
  * `~/.aws/credentials` o variables de entorno en local).
+ *
+ * Usa el endpoint clasico (`bedrock-runtime`) y no `AnthropicBedrockMantle`:
+ * Mantle reconoce el modelo pero responde "not available for this account" en
+ * cuentas nuevas. Ver README, seccion "Decisiones".
  */
-const client = new AnthropicBedrockMantle({ awsRegion: config.bedrockRegion });
+const client = new AnthropicBedrock({ awsRegion: config.bedrockRegion });
 
 const SYSTEM_PROMPT = `Sos un asistente que resume articulos en espanol rioplatense neutro.
 Devolves unicamente el resumen: sin preambulo, sin titulo, sin vinetas, sin comillas.
