@@ -1,5 +1,5 @@
 import { Readability } from "@mozilla/readability";
-import { JSDOM } from "jsdom";
+import { parseHTML } from "linkedom";
 import type { Articulo } from "./types";
 
 const TIMEOUT_FETCH_MS = 10_000;
@@ -105,13 +105,20 @@ export async function extraerArticulo(urlEntrada: string): Promise<Articulo> {
   const url = validarUrl(urlEntrada);
   const html = await descargarHtml(url);
 
-  // `url` le da a Readability la base para resolver enlaces relativos.
-  const dom = new JSDOM(html, { url: url.toString() });
-  const articulo = new Readability(dom.window.document).parse();
+  const { document } = parseHTML(html);
 
-  // jsdom deja timers y recursos vivos; en Lambda eso mantiene el contenedor
-  // ocupado entre invocaciones.
-  dom.window.close();
+  // linkedom no recibe una URL base como jsdom. Readability lee `baseURI` y
+  // `documentURI` para resolver enlaces relativos, asi que se los damos a mano.
+  // Sin esto no rompe, pero deja los enlaces del articulo sin resolver.
+  Object.defineProperty(document, "baseURI", { value: url.toString() });
+  Object.defineProperty(document, "documentURI", { value: url.toString() });
+
+  // linkedom es un parser sin timers ni window real, asi que no hay nada que
+  // cerrar despues: era la razon del `dom.window.close()` que estaba aca.
+  // El cast es inevitable: el Document de linkedom no es el de lib.dom, y este
+  // proyecto no carga los tipos del DOM (corre en Node, no en un navegador).
+  const doc = document as unknown as ConstructorParameters<typeof Readability>[0];
+  const articulo = new Readability(doc).parse();
 
   if (!articulo?.textContent) {
     throw new ErrorDeExtraccion("No se encontro contenido de articulo en esa pagina.");
