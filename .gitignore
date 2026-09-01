@@ -4,4 +4,7 @@ dist/
 *.log
 .env
 .env.local
-samconfig.toml
+
+# samconfig.toml SI se versiona: es la configuracion de despliegue (nombre del
+# stack, region, parametros), no tiene secretos, y sin el la forma de desplegar
+# el proyecto vive solo en la maquina de quien lo desplego.

@@ -1,12 +1,22 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Resumidor de articulos con IA - backend (fase 1)
+Description: Resumidor de articulos con IA - backend (fase 2)
 
 Parameters:
   BedrockModelId:
     Type: String
-    Default: anthropic.claude-haiku-4-5
-    Description: ID de Bedrock. Lleva prefijo "anthropic."; un ID first-party pelado da 400.
+    Default: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    Description: >-
+      ID que se invoca. Es el inference profile cross-region (prefijo "us."),
+      la unica forma en que se sirve Haiku 4.5. La forma corta sin fecha ni
+      version es la del endpoint Mantle; aca da not_found_error, porque en
+      bedrock-runtime el ID viaja en la URL.
+  BedrockFoundationModelId:
+    Type: String
+    Default: "anthropic.claude-haiku-4-5-20251001-v1:0"
+    Description: >-
+      El mismo modelo, sin el prefijo del perfil. IAM lo necesita por separado:
+      el inference profile enruta al foundation model y se evaluan los dos ARNs.
   BedrockRegion:
     Type: String
     Default: us-east-1
@@ -19,8 +29,9 @@ Globals:
     # API Gateway corta a los 30 s. Un timeout de Lambda mas alto no sirve de
     # nada en un flujo sincrono: el cliente ya recibio el 504.
     Timeout: 29
-    # jsdom parsea el DOM entero en memoria; con menos que esto el parseo se
-    # arrastra, porque la CPU en Lambda escala con la memoria asignada.
+    # Dimensionado cuando el parser era jsdom: en Lambda la CPU escala con la
+    # memoria asignada, asi que bajarla alarga el parseo y puede no ahorrar
+    # nada. Con linkedom, que es mucho mas liviano, habria que volver a medir.
     MemorySize: 1024
 
 Resources:
@@ -36,32 +47,68 @@ Resources:
         - AttributeName: id
           KeyType: HASH
 
+  # Declarada explicitamente y no implicita: la API implicita que genera SAM no
+  # admite CorsConfiguration ni RouteSettings.
+  ApiResumidor:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: "$default"
+      # Sin esto el navegador nunca llega al POST: un content-type de
+      # application/json dispara antes un preflight OPTIONS, y una API con solo
+      # la ruta POST lo rechaza con 404 sin invocar la Lambda.
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowHeaders: ["content-type"]
+        AllowMethods: ["POST"]
+      # Limite duro y barato: rechaza en API Gateway, sin invocar la Lambda ni
+      # gastar en Bedrock. Los budgets de AWS solo avisan, y con horas de atraso.
+      RouteSettings:
+        "POST /resumir":
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+
   FuncionResumir:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: backend/
       Handler: handler.handler
+      # Pendiente: ReservedConcurrentExecutions: 2 seria el otro limite duro,
+      # pero hoy haria fallar el deploy. AWS exige dejar 100 unidades de
+      # concurrencia sin reservar en la cuenta, y una cuenta nueva tiene cerca
+      # de 10 en total. Habilitarlo cuando AWS suba la cuota.
       Environment:
         Variables:
           TABLE_NAME: !Ref TablaResumenes
           BEDROCK_MODEL_ID: !Ref BedrockModelId
           BEDROCK_REGION: !Ref BedrockRegion
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref TablaResumenes
         - Statement:
+            # store.ts solo hace PutCommand. DynamoDBCrudPolicy concederia diez
+            # acciones, y ademas sobre table/{nombre}/index/*, que no existe.
             - Effect: Allow
-              Action:
-                - bedrock:InvokeModel
-                - bedrock:InvokeModelWithResponseStream
-              Resource: !Sub "arn:aws:bedrock:${BedrockRegion}::foundation-model/${BedrockModelId}*"
+              Action: dynamodb:PutItem
+              Resource: !GetAtt TablaResumenes.Arn
+        - Statement:
+            # Solo InvokeModel: summarize.ts usa messages.create, no .stream.
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                # Comodin en la region a proposito: el perfil "us." enruta a
+                # us-east-1, us-east-2 y us-west-2, y IAM evalua la region
+                # destino. Fijarla da fallos intermitentes.
+                - !Sub "arn:aws:bedrock:*::foundation-model/${BedrockFoundationModelId}"
+                - !Sub "arn:aws:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
       Events:
         Resumir:
           Type: HttpApi
           Properties:
+            ApiId: !Ref ApiResumidor
             Path: /resumir
             Method: POST
     Metadata:
+      # Este bloque alcanza porque el parser es linkedom. Con jsdom no: hacia
+      # falta empaquetar aparte su xhr-sync-worker.js, que jsdom resuelve por
+      # ruta en disco al cargar el modulo, y eso exigia BuildMethod: makefile.
       BuildMethod: esbuild
       BuildProperties:
         Format: cjs
@@ -70,16 +117,10 @@ Resources:
         Sourcemap: true
         EntryPoints:
           - src/handler.ts
-        # jsdom tiene dependencias nativas opcionales que no instalamos; sin
-        # marcarlas como externas, esbuild falla al no poder resolverlas.
-        External:
-          - canvas
-          - bufferutil
-          - utf-8-validate
 
 Outputs:
   UrlApi:
     Description: Endpoint POST para resumir un articulo
-    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/resumir"
+    Value: !Sub "https://${ApiResumidor}.execute-api.${AWS::Region}.amazonaws.com/resumir"
   NombreTabla:
     Value: !Ref TablaResumenes
