@@ -6,7 +6,11 @@ import { ErrorDeExtraccion } from "./extract";
 import { procesarUrl } from "./pipeline";
 
 const CABECERAS = {
-  "content-type": "application/json",
+  // El charset es redundante segun la RFC 8259 (JSON siempre es UTF-8) y los
+  // navegadores lo decodifican bien sin el. Va explicito igual porque
+  // PowerShell 5.1 asume Latin-1 cuando falta, y rompe los acentos al probar
+  // desde la terminal.
+  "content-type": "application/json; charset=utf-8",
   // Fase 3: restringir al dominio real del frontend en vez de "*".
   "access-control-allow-origin": "*",
 };
