@@ -5,15 +5,21 @@ con Claude en AWS Bedrock.
 
 ## Estado
 
-**Fase 2 en curso: el backend corre en AWS.** El sistema completo funciona de
-punta a punta contra un endpoint HTTP real. Se desplego **a mano desde la
-consola** para entender que hay debajo del template; falta reconciliar
-`template.yaml`, que todavia no se desplego nunca.
+**Fase 2 cerrada: el backend corre en AWS.** El sistema completo funciona de
+punta a punta contra un endpoint HTTP real, desplegado con `sam deploy` desde el
+stack `resumidor`.
+
+Se desplego **dos veces a proposito**: primero entero a mano desde la consola,
+para ver que esconden las abstracciones de SAM, y despues con el template. El
+despliegue manual encontro tres bugs reales en `template.yaml` que no se veian
+leyendo el YAML (ver "Desplegarlo a mano: que mostro"). Los recursos creados a
+mano ya se borraron.
 
 - [x] Fase 1 - Pipeline: extraccion -> resumen -> persistencia
-- [ ] Fase 2 - Deploy a AWS
+- [x] Fase 2 - Deploy a AWS
   - [x] Desplegado a mano por consola y verificado de punta a punta
-  - [ ] `template.yaml` corregido y desplegado con SAM
+  - [x] `template.yaml` corregido y desplegado con SAM
+  - [x] Recursos manuales borrados
 - [ ] Fase 3 - Frontend en Next.js
 
 ## Arquitectura
@@ -202,12 +208,12 @@ para la fase 2 o 3, cuando haya numeros de latencia reales para justificarla.
 
 ## Pendientes conocidos
 
-**`template.yaml` esta corregido pero todavia no se desplego.** Las diferencias
-que encontro el despliegue manual ya estan aplicadas: el ID del modelo, los dos
-ARNs de Bedrock, `dynamodb:PutItem` explicito en vez de `DynamoDBCrudPolicy`,
-la API declarada explicitamente con `CorsConfiguration` y `RouteSettings`, y el
-build simplificado tras el cambio a linkedom. Falta `sam deploy` y comparar el
-stack resultante con lo creado a mano.
+`template.yaml` ya tiene aplicadas todas las diferencias que encontro el
+despliegue manual: el ID del modelo, los dos ARNs de Bedrock, `dynamodb:PutItem`
+explicito en vez de `DynamoDBCrudPolicy`, la API declarada explicitamente con
+`CorsConfiguration` y `RouteSettings`, y el build simplificado tras el cambio a
+linkedom. Se comparo el rol IAM generado por CloudFormation contra el escrito a
+mano: trust policy identica y los ARNs de Bedrock iguales byte por byte.
 
 Lo que queda abierto:
 
@@ -225,6 +231,13 @@ Lo que queda abierto:
   linkedom hay margen para bajarla, pero en Lambda la CPU escala con la memoria,
   asi que bajarla puede alargar el parseo y no ahorrar nada. Hay que medir, no
   estimar.
+- **El log group de la Lambda no tiene retencion.** El default de todo log group
+  de Lambda es "nunca expira", asi que los logs se acumulan para siempre. Aca son
+  kilobytes y da igual, pero es el patron que hace que CloudWatch Logs termine
+  siendo una parte no trivial de la factura en cuentas reales. Se arregla
+  declarando un `AWS::Logs::LogGroup` con `RetentionInDays`, pero eso obliga a
+  fijar tambien el `FunctionName`: hoy CloudFormation lo genera con sufijo
+  aleatorio y el nombre del log group no se puede predecir.
 - CORS esta en `*` y el endpoint no tiene autenticacion. Restringir al dominio
   del frontend en la fase 3.
 - Sin tests automatizados todavia.
@@ -257,7 +270,8 @@ no tiene pantalla, solo CLI o `RouteSettings`.
 
 ## Borrar lo desplegado a mano
 
-En orden inverso a la creacion, porque las dependencias lo exigen:
+Ya ejecutado. Queda como registro del procedimiento, en orden inverso a la
+creacion porque las dependencias lo exigen:
 
 1. API Gateway -> `resumidor-manual-api` -> Delete
 2. Lambda -> `resumidor-manual` -> Delete
