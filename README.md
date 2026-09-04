@@ -5,9 +5,9 @@ con Claude en AWS Bedrock.
 
 ## Estado
 
-**Fase 2 cerrada: el backend corre en AWS.** El sistema completo funciona de
-punta a punta contra un endpoint HTTP real, desplegado con `sam deploy` desde el
-stack `resumidor`.
+**Fase 3 cerrada: el sistema completo esta en linea.** Frontend en Next.js
+servido por CloudFront sobre un bucket privado de S3, contra la API de la fase
+2. Todo -backend y frontend- vive en un unico stack, `resumidor`.
 
 Se desplego **dos veces a proposito**: primero entero a mano desde la consola,
 para ver que esconden las abstracciones de SAM, y despues con el template. El
@@ -20,13 +20,19 @@ mano ya se borraron.
   - [x] Desplegado a mano por consola y verificado de punta a punta
   - [x] `template.yaml` corregido y desplegado con SAM
   - [x] Recursos manuales borrados
-- [ ] Fase 3 - Frontend en Next.js
+- [x] Fase 3 - Frontend en Next.js
+  - [x] Export estatico servido desde S3 + CloudFront con Origin Access Control
+  - [x] CORS acotado al dominio de CloudFront, resuelto por CloudFormation
 
 ## Arquitectura
 
 ```
-Next.js (fase 3)
-    |  POST { url }
+Navegador
+    |
+    v
+CloudFront  --(OAC, SigV4)-->  S3 (bucket privado, export estatico de Next)
+    |
+    |  el JS de la pagina hace POST { url }
     v
 API Gateway (HTTP API)
     |
@@ -42,7 +48,8 @@ Lambda  --1--> fetch(url) --> linkedom --> Readability --> { title, text }
 ## Estructura
 
 ```
-template.yaml            Infra: Lambda + HTTP API + DynamoDB + permisos IAM
+template.yaml            Infra completa: Lambda, HTTP API, DynamoDB, IAM,
+                         S3 y CloudFront
 backend/
   src/
     handler.ts           Entrada de Lambda. Solo HTTP: parseo, codigos, errores.
@@ -54,6 +61,12 @@ backend/
     types.ts             Forma del registro.
   scripts/
     local.ts             Corre el pipeline sin desplegar nada.
+frontend/
+  next.config.mjs        Export estatico (output: "export").
+  app/
+    page.tsx             La pagina entera: formulario, estados, errores.
+    layout.tsx           html y metadata.
+    globals.css          Estilos, claro y oscuro.
 ```
 
 `handler.ts` y `pipeline.ts` estan separados a proposito: el pipeline no sabe
@@ -82,6 +95,13 @@ npm run local -- https://en.wikipedia.org/wiki/Serverless_computing
 Sin `TABLE_NAME` en el entorno, el paso de DynamoDB se saltea y avisa. Asi se
 puede probar el resumen sin crear la tabla.
 
+**El frontend con `npm run dev` no puede llamar a la API desplegada.** El
+`AllowOrigins` de la API lista unicamente el dominio de CloudFront, asi que el
+navegador bloquea la respuesta y la pagina muestra "No se pudo contactar al
+servidor" sin mas detalle -un fallo de CORS es indistinguible de uno de red
+desde JavaScript. Es esperado, no un bug. Para recuperarlo habria que agregar
+`http://localhost:3000` a `AllowOrigins` en el template.
+
 ## Construir el artefacto
 
 ```bash
@@ -99,6 +119,44 @@ Compress-Archive -Path dist\handler.js -DestinationPath dist\handler.zip -Force
 ```
 
 Ese paso es solo para el despliegue manual; `sam build` empaqueta por su cuenta.
+
+## Desplegar
+
+Son dos pasos y ninguno se puede saltear: `sam deploy` crea la infraestructura
+pero **no sube el frontend**, porque los archivos del sitio no son parte del
+template.
+
+```bash
+# 1. backend + infraestructura
+sam build
+sam deploy
+
+# 2. frontend
+cd frontend
+npm run build
+aws s3 sync out/ s3://<NombreBucketSitio>
+```
+
+`sam deploy` imprime los Outputs, y de ahi salen los dos valores que hacen falta:
+`NombreBucketSitio` para el sync y `UrlSitio` para abrir el resultado. El bucket
+no tiene nombre fijo -CloudFormation lo genera- justamente porque los nombres de
+bucket son unicos en todo AWS.
+
+**`sam deploy` no lee `template.yaml`.** Lee `.aws-sam/build/template.yaml`, que
+produce `sam build`. Si editas el template y desplegas sin reconstruir, SAM
+despliega la version vieja y responde "No changes to deploy" sin avisar que el
+build esta desactualizado.
+
+**Al cambiar el frontend hace falta invalidar la cache.** CloudFront sigue
+sirviendo la version anterior hasta que expire el TTL, aunque el objeto en S3 ya
+sea otro:
+
+```bash
+aws cloudfront create-invalidation --distribution-id <id> --paths "/*"
+```
+
+Las primeras 1000 rutas por mes son gratis. Es el paso que se olvida y que hace
+creer que el despliegue no funciono.
 
 ## Prerrequisitos de cuenta
 
@@ -160,6 +218,29 @@ Si Mantle se habilita mas adelante, volver son esas mismas dos lineas mas el
 cambio de ID y de permisos IAM (`bedrock-mantle:CreateInference` sobre
 `arn:aws:bedrock-mantle:REGION:CUENTA:project/default`).
 
+**Export estatico sobre S3 + CloudFront, no Amplify ni Vercel.** El frontend no
+necesita servidor: es un formulario que hace `fetch` a la API. Con
+`output: "export"`, `next build` deja HTML, CSS y JS sueltos que S3 sirve sin
+ejecutar nada.
+
+Se descarto Amplify Hosting porque esconde el S3 y el CloudFront que hay debajo
+-que es justo lo que este proyecto queria destapar-, y Vercel porque sacaria el
+frontend de AWS.
+
+El bucket queda **completamente privado**: los cuatro bloqueos de acceso publico
+activos y ninguna configuracion de sitio web estatico. CloudFront lo lee con un
+Origin Access Control, que firma cada request con SigV4. Pedirle un objeto
+directo a S3 devuelve 403; el mismo objeto por CloudFront devuelve 200. Es la
+diferencia entre "un bucket abierto a internet" y "un origen privado detras de
+un CDN".
+
+**Es la razon por la que CloudFront esta en el mismo stack que la API.** El
+`AllowOrigins` del CORS no contiene un dominio sino una referencia,
+`!Sub "https://${DistribucionSitio.DomainName}"`. CloudFormation lo resuelve al
+desplegar, asi que si la distribucion se recrea, el CORS se actualiza con ella
+en el mismo deploy y no pueden quedar desincronizados. El costo es que ahora
+todos los deploys esperan a CloudFront, aunque solo se haya tocado la Lambda.
+
 **linkedom en vez de jsdom.** jsdom evalua
 `require.resolve("./xhr-sync-worker.js")` al cargar el modulo, para poder lanzar
 un proceso hijo si alguien usa XHR sincrono. Un bundler borra la estructura de
@@ -217,11 +298,6 @@ mano: trust policy identica y los ARNs de Bedrock iguales byte por byte.
 
 Lo que queda abierto:
 
-- **La cabecera CORS de `handler.ts` quedo muerta.** Con `CorsConfiguration` en
-  la API, API Gateway **ignora las cabeceras CORS que devuelve la integracion**
-  (esta documentado). O sea que el `access-control-allow-origin: *` de
-  `handler.ts` ya no hace nada: no rompe, pero miente. Conviene sacarlo, porque
-  leer el handler sugiere que ahi se controla el CORS y no es asi.
 - **`ReservedConcurrentExecutions` esta como comentario, no como propiedad.**
   Junto con el throttling son los unicos limites duros reales contra un gasto
   descontrolado: los budgets de AWS solo avisan, y con varias horas de retraso.
@@ -238,8 +314,16 @@ Lo que queda abierto:
   declarando un `AWS::Logs::LogGroup` con `RetentionInDays`, pero eso obliga a
   fijar tambien el `FunctionName`: hoy CloudFormation lo genera con sufijo
   aleatorio y el nombre del log group no se puede predecir.
-- CORS esta en `*` y el endpoint no tiene autenticacion. Restringir al dominio
-  del frontend en la fase 3.
+- **El endpoint no tiene autenticacion.** El CORS ya esta acotado al dominio de
+  CloudFront, pero eso solo frena el uso desde otra pagina web: CORS lo aplica el
+  navegador, asi que `curl` o cualquier script lo ignoran por completo. Contra
+  abuso programatico lo unico que protege hoy es el throttling de 5 req/s y la
+  cuota baja de concurrencia de la cuenta. Si algun dia importa, la opcion es un
+  JWT authorizer con Cognito.
+- **El sync a S3 no esta automatizado.** `sam deploy` no sube el frontend, y el
+  `aws s3 sync` mas la invalidacion son pasos manuales documentados en
+  "Desplegar" pero no scripteados. Un `npm run deploy` que lea los Outputs del
+  stack lo cerraria.
 - Sin tests automatizados todavia.
 
 ## Desplegarlo a mano: que mostro

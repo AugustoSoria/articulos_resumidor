@@ -11,9 +11,12 @@ const CABECERAS = {
   // PowerShell 5.1 asume Latin-1 cuando falta, y rompe los acentos al probar
   // desde la terminal.
   "content-type": "application/json; charset=utf-8",
-  // Fase 3: restringir al dominio real del frontend en vez de "*".
-  "access-control-allow-origin": "*",
 };
+
+// Nota: aca no va ninguna cabecera CORS. El CORS lo resuelve API Gateway con
+// su CorsConfiguration, y cuando esa configuracion existe **ignora** las
+// cabeceras CORS que devuelva la integracion. Ponerlas aca no romperia nada,
+// pero haria creer que el CORS se controla desde el codigo, y no es asi.
 
 function responder(status: number, cuerpo: unknown): APIGatewayProxyResultV2 {
   return { statusCode: status, headers: CABECERAS, body: JSON.stringify(cuerpo) };

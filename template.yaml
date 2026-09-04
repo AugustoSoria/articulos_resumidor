@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Resumidor de articulos con IA - backend (fase 2)
+Description: Resumidor de articulos con IA - backend + frontend (fase 3)
 
 Parameters:
   BedrockModelId:
@@ -56,8 +56,14 @@ Resources:
       # Sin esto el navegador nunca llega al POST: un content-type de
       # application/json dispara antes un preflight OPTIONS, y una API con solo
       # la ruta POST lo rechaza con 404 sin invocar la Lambda.
+      #
+      # El origen no esta escrito en ningun lado: CloudFormation resuelve el
+      # dominio de la distribucion al desplegar. Si algun dia se recrea, el
+      # CORS se actualiza con ella en el mismo deploy y no pueden quedar
+      # desincronizados.
       CorsConfiguration:
-        AllowOrigins: ["*"]
+        AllowOrigins:
+          - !Sub "https://${DistribucionSitio.DomainName}"
         AllowHeaders: ["content-type"]
         AllowMethods: ["POST"]
       # Limite duro y barato: rechaza en API Gateway, sin invocar la Lambda ni
@@ -118,9 +124,96 @@ Resources:
         EntryPoints:
           - src/handler.ts
 
+  # --- Frontend: bucket privado detras de un CDN ---
+
+  BucketSitio:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Sin BucketName a proposito: los nombres de bucket son unicos en todo
+      # AWS, no solo en la cuenta, asi que fijarlo invita a colisiones y a que
+      # el stack no se pueda desplegar dos veces. CloudFormation genera uno.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # Reemplaza a la vieja Origin Access Identity. Hace que CloudFront firme cada
+  # request al bucket con SigV4, y por eso el bucket puede quedar 100% privado:
+  # pedirle un objeto directo a S3 devuelve 403.
+  AccesoOrigen:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  DistribucionSitio:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} - frontend"
+        # Sin esto, entrar al dominio pelado pide el objeto raiz del bucket,
+        # que no existe. El navegador nunca pide /index.html explicitamente.
+        DefaultRootObject: index.html
+        # Solo Norteamerica y Europa: es la clase mas barata y sobra para esto.
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: sitio-s3
+            # RegionalDomainName y no DomainName: el global puede redirigir
+            # entre endpoints y romper la firma SigV4 del OAC.
+            DomainName: !GetAtt BucketSitio.RegionalDomainName
+            OriginAccessControlId: !GetAtt AccesoOrigen.Id
+            # Vacio a proposito: es el campo de la vieja Origin Access Identity,
+            # que el OAC reemplaza, pero CloudFormation lo sigue exigiendo.
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: sitio-s3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          # Politica gestionada por AWS: "CachingOptimized".
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        # S3 responde 403 y no 404 ante un objeto inexistente, porque no le
+        # dimos s3:ListBucket: decir "no existe" filtraria que hay en el bucket.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 404
+            ResponsePagePath: /404.html
+          - ErrorCode: 404
+            ResponseCode: 404
+            ResponsePagePath: /404.html
+
+  PermisoLecturaCloudFront:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BucketSitio
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${BucketSitio.Arn}/*"
+            # Sin esta condicion, cualquier distribucion de CloudFront de
+            # cualquier cuenta del mundo podria leer el bucket: el principal
+            # cloudfront.amazonaws.com es el mismo para todos.
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${DistribucionSitio}"
+
 Outputs:
   UrlApi:
     Description: Endpoint POST para resumir un articulo
     Value: !Sub "https://${ApiResumidor}.execute-api.${AWS::Region}.amazonaws.com/resumir"
   NombreTabla:
     Value: !Ref TablaResumenes
+  UrlSitio:
+    Description: URL publica del frontend
+    Value: !Sub "https://${DistribucionSitio.DomainName}"
+  NombreBucketSitio:
+    Description: Bucket donde sincronizar el export de Next (frontend/out/)
+    Value: !Ref BucketSitio
