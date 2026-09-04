@@ -1,0 +1,156 @@
+:root {
+  --fondo: #fbfaf8;
+  --superficie: #ffffff;
+  --texto: #1c1a17;
+  --tenue: #6b655d;
+  --borde: #e2ddd4;
+  --acento: #8a5a2b;
+  --error: #9b2c2c;
+  --error-fondo: #fdf2f2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fondo: #16150f;
+    --superficie: #1e1d17;
+    --texto: #efece5;
+    --tenue: #9b948a;
+    --borde: #322f27;
+    --acento: #d9a066;
+    --error: #f0a9a9;
+    --error-fondo: #2a1a1a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--fondo);
+  color: var(--texto);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 4rem 1.5rem 6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+header h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.75rem;
+  letter-spacing: -0.02em;
+}
+
+header p {
+  margin: 0;
+  color: var(--tenue);
+  max-width: 34rem;
+}
+
+form {
+  display: flex;
+  gap: 0.75rem;
+}
+
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.7rem 0.9rem;
+  font: inherit;
+  color: var(--texto);
+  background: var(--superficie);
+  border: 1px solid var(--borde);
+  border-radius: 6px;
+}
+
+input:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--acento);
+  outline-offset: 2px;
+}
+
+button {
+  padding: 0.7rem 1.4rem;
+  font: inherit;
+  font-weight: 500;
+  color: var(--fondo);
+  background: var(--acento);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.estado {
+  margin: 0;
+  color: var(--tenue);
+  font-size: 0.9rem;
+}
+
+.error {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  color: var(--error);
+  background: var(--error-fondo);
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+article {
+  padding: 1.75rem;
+  background: var(--superficie);
+  border: 1px solid var(--borde);
+  border-radius: 10px;
+}
+
+article h2 {
+  margin: 0 0 1rem;
+  font-size: 1.2rem;
+  line-height: 1.35;
+  text-wrap: balance;
+}
+
+.resumen {
+  margin: 0 0 1.5rem;
+  font-size: 1.05rem;
+}
+
+article footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--borde);
+  font-size: 0.85rem;
+  color: var(--tenue);
+}
+
+article footer a {
+  color: var(--acento);
+}
+
+@media (max-width: 32rem) {
+  form {
+    flex-direction: column;
+  }
+  main {
+    padding-top: 2.5rem;
+  }
+}
