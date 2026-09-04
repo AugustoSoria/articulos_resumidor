@@ -26,6 +26,8 @@ mano ya se borraron.
 
 ## Arquitectura
 
+### Que habla con que
+
 ```
 Navegador
     |
@@ -43,6 +45,47 @@ Lambda  --1--> fetch(url) --> linkedom --> Readability --> { title, text }
     |
     v
 { id, url, title, summary, createdAt, status }
+```
+
+### Flujo de una request
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Navegador
+    participant CF as CloudFront y S3
+    participant API as API Gateway
+    participant L as Lambda
+    participant W as Sitio del articulo
+    participant B as Bedrock
+    participant D as DynamoDB
+
+    U->>CF: GET /
+    CF-->>U: HTML y JS del export estatico de Next
+
+    U->>API: OPTIONS /resumir, el preflight de CORS
+    API-->>U: cabeceras CORS, solo el dominio de CloudFront
+    U->>API: POST /resumir con el campo url
+    Note over API: throttling de 5 rps, rechaza antes de invocar la Lambda
+
+    API->>L: APIGatewayProxyEventV2
+    L->>L: handler.ts parsea el cuerpo, 400 si no hay url
+    L->>L: validarUrl corta IPs internas, defensa de SSRF
+    L->>W: fetch con timeout de 10s y tope de 5 MB
+    W-->>L: HTML
+    L->>L: linkedom y Readability dejan title y text
+    L->>B: InvokeModel con el texto recortado
+    B-->>L: resumen de 3 a 4 oraciones
+
+    alt el pipeline termina bien
+        L->>D: PutItem con status done
+        L-->>API: 200 con el registro completo
+    else falla la extraccion o el resumen
+        L->>D: PutItem con status error, para saber que dominios rompen
+        L-->>API: 422 si es ErrorDeExtraccion, 500 el resto
+    end
+
+    API-->>U: JSON, y la pagina muestra el resumen o el error
 ```
 
 ## Estructura
