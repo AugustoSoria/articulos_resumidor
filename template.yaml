@@ -21,6 +21,16 @@ Parameters:
     Type: String
     Default: us-east-1
     Description: Region donde esta habilitado el modelo (puede diferir de la del stack).
+  # Sin Default a proposito: no puede vivir en git, ni en este archivo ni en
+  # samconfig.toml. Se pasa en cada deploy con --parameter-overrides.
+  # NoEcho hace que CloudFormation lo muestre como **** en la consola y en
+  # describe-stacks. Ojo: no lo cifra; queda en texto plano en la config de
+  # CloudFront y en las variables de entorno de la Lambda.
+  SecretoOrigen:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: Secreto compartido entre CloudFront y el authorizer de la API.
 
 Globals:
   Function:
@@ -69,6 +79,47 @@ Resources:
         "POST /api/resumir":
           ThrottlingRateLimit: 5
           ThrottlingBurstLimit: 10
+      # Cierra el acceso directo a execute-api: solo pasan los requests que
+      # traen el header que agrega CloudFront. No limita el volumen de uso.
+      Auth:
+        DefaultAuthorizer: AutorizadorOrigen
+        Authorizers:
+          AutorizadorOrigen:
+            FunctionArn: !GetAtt FuncionAutorizadora.Arn
+            AuthorizerPayloadFormatVersion: "2.0"
+            EnableSimpleResponses: true
+            # Default false: sin esto API Gateway no puede invocar al
+            # authorizer y TODAS las requests fallan con 500, las legitimas
+            # incluidas.
+            EnableFunctionDefaultPermissions: true
+            Identity:
+              Headers:
+                - x-origen-cloudfront
+              # El secreto es constante, asi que todas las requests comparten
+              # la misma clave de cache: el authorizer corre una vez cada
+              # 5 minutos, no una vez por request.
+              ReauthorizeEvery: 300
+
+  FuncionAutorizadora:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: authorizer.handler
+      # Compara dos strings: no necesita los 1024 MB ni los 29 s del Global.
+      MemorySize: 128
+      Timeout: 3
+      Environment:
+        Variables:
+          SECRETO_ORIGEN: !Ref SecretoOrigen
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Format: cjs
+        Target: node22
+        Minify: false
+        Sourcemap: false
+        EntryPoints:
+          - src/authorizer.ts
 
   FuncionResumir:
     Type: AWS::Serverless::Function
@@ -175,6 +226,12 @@ Resources:
             CustomOriginConfig:
               OriginProtocolPolicy: https-only
               OriginSSLProtocols: [TLSv1.2]
+            # La pulsera: CloudFront la agrega en el tramo hacia API Gateway,
+            # nunca la ve el navegador. Si el viewer manda un header con el
+            # mismo nombre, CloudFront lo pisa con este valor.
+            OriginCustomHeaders:
+              - HeaderName: x-origen-cloudfront
+                HeaderValue: !Ref SecretoOrigen
         DefaultCacheBehavior:
           TargetOriginId: sitio-s3
           ViewerProtocolPolicy: redirect-to-https
