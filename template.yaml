@@ -73,12 +73,22 @@ Resources:
       # Efecto colateral util: el frontend usa una URL relativa, asi que el
       # bundle deja de depender del ambiente en el que se construyo.
       #
-      # Limite duro y barato: rechaza en API Gateway, sin invocar la Lambda ni
+      # Limite barato: rechaza en API Gateway, sin invocar la Lambda ni
       # gastar en Bedrock. Los budgets de AWS solo avisan, y con horas de atraso.
+      #
+      # OJO: esto NO es un techo de gasto. API Gateway aplica el throttling en
+      # base a mejor esfuerzo, como objetivo y no como limite garantizado. Con
+      # estos valores se probaron 20 requests seguidas y pasaron 18. Frena algo
+      # y rechaza antes de invocar nada, asi que queda como primera linea blanda.
+      # El techo real tiene que venir de ReservedConcurrentExecutions (ver la
+      # funcion) o de un Budget Action. Detalle en el README, "Decisiones".
+      #
+      # Es un token bucket: el rate es cuantas fichas se reponen por segundo y
+      # el burst cuantas entran en el balde, o sea cuanto se tolera de golpe.
       RouteSettings:
         "POST /api/resumir":
-          ThrottlingRateLimit: 5
-          ThrottlingBurstLimit: 10
+          ThrottlingRateLimit: 0.5
+          ThrottlingBurstLimit: 2
       # Cierra el acceso directo a execute-api: solo pasan los requests que
       # traen el header que agrega CloudFront. No limita el volumen de uso.
       Auth:

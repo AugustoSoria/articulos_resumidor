@@ -22,7 +22,8 @@ mano ya se borraron.
   - [x] Recursos manuales borrados
 - [x] Fase 3 - Frontend en Next.js
   - [x] Export estatico servido desde S3 + CloudFront con Origin Access Control
-  - [x] CORS acotado al dominio de CloudFront, resuelto por CloudFormation
+  - [x] La API detras del mismo CloudFront (`/api/*`): mismo origen, sin CORS
+  - [x] Lambda authorizer: llamar a `execute-api` directo ya no funciona
 
 ## Arquitectura
 
@@ -32,13 +33,12 @@ mano ya se borraron.
 Navegador
     |
     v
-CloudFront  --(OAC, SigV4)-->  S3 (bucket privado, export estatico de Next)
+CloudFront  --/*-------(OAC, SigV4)--------->  S3 (bucket privado, export de Next)
     |
-    |  el JS de la pagina hace POST { url }
-    v
-API Gateway (HTTP API)
-    |
-    v
+    +--/api/*--(header x-origen-cloudfront)-->  API Gateway (HTTP API)
+                                                    |  throttling (aproximado)
+                                                    |  Lambda authorizer: compara el header
+                                                    v
 Lambda  --1--> fetch(url) --> linkedom --> Readability --> { title, text }
         --2--> Bedrock (Claude Haiku 4.5) --> resumen
         --3--> DynamoDB (put)
@@ -65,8 +65,9 @@ sequenceDiagram
 
     U->>CF: POST /api/resumir con el campo url
     Note over U,CF: mismo origen que el sitio, asi que no hay preflight ni CORS
-    CF->>API: reenvia al origen api-gateway, sin reescribir el path
-    Note over API: throttling, rechaza antes de invocar la Lambda
+    CF->>API: reenvia al origen api-gateway y le agrega el header x-origen-cloudfront
+    Note over API: throttling aproximado, despues el authorizer compara el header con el secreto
+    Note over API: sin header 401 sin invocar nada, con header incorrecto 403
 
     API->>L: APIGatewayProxyEventV2
     L->>L: handler.ts parsea el cuerpo, 400 si no hay url
@@ -97,6 +98,7 @@ template.yaml            Infra completa: Lambda, HTTP API, DynamoDB, IAM,
 backend/
   src/
     handler.ts           Entrada de Lambda. Solo HTTP: parseo, codigos, errores.
+    authorizer.ts        Lambda authorizer: deja pasar solo lo que viene de CloudFront.
     pipeline.ts          El flujo completo, sin nada de HTTP.
     extract.ts           Validacion de URL + fetch + Readability.
     summarize.ts         Llamada a Bedrock.
@@ -139,12 +141,12 @@ npm run local -- https://en.wikipedia.org/wiki/Serverless_computing
 Sin `TABLE_NAME` en el entorno, el paso de DynamoDB se saltea y avisa. Asi se
 puede probar el resumen sin crear la tabla.
 
-**El frontend con `npm run dev` no puede llamar a la API desplegada.** El
-`AllowOrigins` de la API lista unicamente el dominio de CloudFront, asi que el
-navegador bloquea la respuesta y la pagina muestra "No se pudo contactar al
-servidor" sin mas detalle -un fallo de CORS es indistinguible de uno de red
-desde JavaScript. Es esperado, no un bug. Para recuperarlo habria que agregar
-`http://localhost:3000` a `AllowOrigins` en el template.
+**El frontend con `npm run dev` no tiene API contra la cual probar.** La pagina
+llama a la ruta relativa `/api/resumir`, que en produccion resuelve CloudFront. El
+servidor de desarrollo de Next no tiene esa ruta, y la API desplegada tampoco
+sirve como reemplazo: sin el header que agrega CloudFront, el authorizer la
+rechaza. Es esperado. Para probar la UI hay que desplegar; para probar el
+pipeline esta `npm run local`.
 
 ## Construir el artefacto
 
@@ -171,15 +173,33 @@ pero **no sube el frontend**, porque los archivos del sitio no son parte del
 template.
 
 ```bash
-# 1. backend + infraestructura
+# 1. backend + infraestructura (PowerShell)
 sam build
-sam deploy
+$secreto = Read-Host "Secreto"
+sam deploy --parameter-overrides "SecretoOrigen=$secreto"
 
 # 2. frontend
 cd frontend
 npm run build
 aws s3 sync out/ s3://<NombreBucketSitio>
 ```
+
+**Cada deploy exige el secreto.** `SecretoOrigen` no tiene default a proposito: no puede
+vivir en git, ni en el template ni en `samconfig.toml`. Por eso ese archivo ya no tiene
+`parameter_overrides`: si lo tuviera, el `--parameter-overrides` de la linea de comandos
+lo reemplazaria entero en vez de sumarse. `Read-Host` evita que el valor quede en el
+historial de la terminal.
+
+Se genero con el generador criptografico del sistema, no con `Get-Random`:
+
+```powershell
+node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+Pasar uno nuevo en cada deploy tambien funciona y rota el secreto gratis,
+porque CloudFront y el authorizer lo leen del mismo parametro del mismo stack.
+El costo es que cada deploy modifica la distribucion -mas lento- y hay unos
+minutos de 403 mientras CloudFront propaga el valor nuevo.
 
 `sam deploy` imprime los Outputs, y de ahi salen los dos valores que hacen falta:
 `NombreBucketSitio` para el sync y `UrlSitio` para abrir el resultado. El bucket
@@ -278,12 +298,51 @@ directo a S3 devuelve 403; el mismo objeto por CloudFront devuelve 200. Es la
 diferencia entre "un bucket abierto a internet" y "un origen privado detras de
 un CDN".
 
-**Es la razon por la que CloudFront esta en el mismo stack que la API.** El
-`AllowOrigins` del CORS no contiene un dominio sino una referencia,
-`!Sub "https://${DistribucionSitio.DomainName}"`. CloudFormation lo resuelve al
-desplegar, asi que si la distribucion se recrea, el CORS se actualiza con ella
-en el mismo deploy y no pueden quedar desincronizados. El costo es que ahora
-todos los deploys esperan a CloudFront, aunque solo se haya tocado la Lambda.
+**La API detras del mismo CloudFront, en `/api/*`.** La distribucion tiene dos
+origenes: el bucket para todo lo demas y API Gateway para `/api/*`. Para el navegador
+la pagina y la API son el mismo origen, asi que **CORS deja de existir**: no hay
+preflight ni `CorsConfiguration`. La ruta se llama `/api/resumir` porque CloudFront no
+reescribe paths; tiene que coincidir de punta a punta.
+
+Dos detalles del behavior: `CachingDisabled` (cada URL da un resumen distinto) y
+`AllViewerExceptHostHeader`, porque si CloudFront le reenviara a API Gateway el `Host`
+del navegador, API Gateway no reconoceria la API.
+
+El efecto lateral es tan bueno como el principal: el frontend usa una ruta
+relativa, asi que el bundle ya no contiene ningun dominio y el mismo build sirve
+en cualquier despliegue.
+
+**Lambda authorizer con un header secreto.** CloudFront le agrega
+`x-origen-cloudfront` a cada request que reenvia a la API, y el authorizer lo compara
+contra el mismo secreto. El navegador nunca ve ese valor: viaja solo en el tramo
+CloudFront -> API Gateway. Un secreto en el frontend no serviria, porque todo lo
+que esta en el bundle lo puede leer cualquiera con las devtools.
+
+Lo que logra es que `execute-api` deje de ser una puerta: sin header responde 401
+(API Gateway rechaza sin invocar al authorizer, porque es la fuente de identidad
+declarada) y con un header inventado, 403. Un header falso mandado *a traves* de
+CloudFront tampoco sirve: CloudFront lo pisa con el suyo.
+
+**Lo que no logra es limitar el uso.** Cualquiera puede pegarle a CloudFront y
+recibir el header. El authorizer obliga a que todo el trafico pase por un solo
+lugar; solo protege si en ese lugar hay un limite, como un WAF con regla de
+tasa. No se agrego el WAF (~6 USD/mes, mas que todo el resto del stack) porque
+limita por IP: un ataque distribuido lo atraviesa.
+
+Otros detalles: el authorizer usa `timingSafeEqual` y no `===`, para no filtrar el
+secreto por tiempo de respuesta; cachea el resultado 5 minutos, asi que corre
+una vez cada 5 minutos y no por request; y `EnableFunctionDefaultPermissions` tiene
+que estar en `true` -su default es `false` y sin el API Gateway no puede invocar al
+authorizer, con lo que todo falla con 500.
+
+**El throttle de API Gateway no es un techo de gasto.** Esta en 0.5 req/s con
+burst 2, y se verifico que esta aplicado. Pero mandando 20 requests seguidas
+pasaron 18, y de 30 en paralelo pasaron 27; con esos valores deberian haber
+pasado unas 5. La documentacion lo advierte: se aplica en base a mejor esfuerzo,
+como objetivo y no como techo garantizado. Es un sistema distribuido donde cada
+nodo lleva su propia cuenta aproximada, y con numeros tan chicos el error es
+enorme en proporcion. Frena algo y rechaza antes de invocar nada, asi que se
+deja, pero como primera linea blanda.
 
 **linkedom en vez de jsdom.** jsdom evalua
 `require.resolve("./xhr-sync-worker.js")` al cargar el modulo, para poder lanzar
@@ -336,17 +395,28 @@ para la fase 2 o 3, cuando haya numeros de latencia reales para justificarla.
 `template.yaml` ya tiene aplicadas todas las diferencias que encontro el
 despliegue manual: el ID del modelo, los dos ARNs de Bedrock, `dynamodb:PutItem`
 explicito en vez de `DynamoDBCrudPolicy`, la API declarada explicitamente con
-`CorsConfiguration` y `RouteSettings`, y el build simplificado tras el cambio a
+`RouteSettings`, y el build simplificado tras el cambio a
 linkedom. Se comparo el rol IAM generado por CloudFormation contra el escrito a
 mano: trust policy identica y los ARNs de Bedrock iguales byte por byte.
 
 Lo que queda abierto:
 
-- **`ReservedConcurrentExecutions` esta como comentario, no como propiedad.**
-  Junto con el throttling son los unicos limites duros reales contra un gasto
-  descontrolado: los budgets de AWS solo avisan, y con varias horas de retraso.
-  Hoy ponerlo haria fallar el deploy, porque AWS exige dejar 100 unidades de
-  concurrencia sin reservar y una cuenta nueva tiene cerca de 10 en total.
+- **No hay un techo de gasto garantizado.** Cada resumen cuesta ~0,007 USD, casi
+  todo Bedrock. El throttle es aproximado (ver "Decisiones") y el authorizer no
+  limita volumen. El unico limite exacto hoy es la cuota de concurrencia de la
+  cuenta nueva (~10 ejecuciones a la vez): con ~5 s por resumen da ~2 por
+  segundo, **~50 USD/hora en el peor caso**. Y ese limite no lo eligio el
+  proyecto: desaparece cuando AWS suba la cuota.
+
+  Lo que lo resolveria, en orden:
+  1. Pedir el aumento de *Concurrent executions* en Service Quotas (gratis).
+     Paradojicamente es lo que destraba el paso 2: hoy AWS exige dejar 100
+     unidades sin reservar, y con ~10 en total no se puede reservar ninguna.
+  2. `ReservedConcurrentExecutions: 1`, que ya esta como comentario en el template.
+     Lo aplica Lambda, no es aproximado: un resumen a la vez, ~720 por hora,
+     ~5 USD/hora en el peor caso. Con `0` funciona como interruptor de apagado.
+  3. Un Budget Action que, al cruzar un monto, le adjunte una policy de Deny al
+     rol de la Lambda. Llega con horas de retraso, pero corta el total.
 - **La memoria de la Lambda (1024 MB) quedo dimensionada para jsdom.** Con
   linkedom hay margen para bajarla, pero en Lambda la CPU escala con la memoria,
   asi que bajarla puede alargar el parseo y no ahorrar nada. Hay que medir, no
@@ -358,12 +428,16 @@ Lo que queda abierto:
   declarando un `AWS::Logs::LogGroup` con `RetentionInDays`, pero eso obliga a
   fijar tambien el `FunctionName`: hoy CloudFormation lo genera con sufijo
   aleatorio y el nombre del log group no se puede predecir.
-- **El endpoint no tiene autenticacion.** El CORS ya esta acotado al dominio de
-  CloudFront, pero eso solo frena el uso desde otra pagina web: CORS lo aplica el
-  navegador, asi que `curl` o cualquier script lo ignoran por completo. Contra
-  abuso programatico lo unico que protege hoy es el throttling de 5 req/s y la
-  cuota baja de concurrencia de la cuenta. Si algun dia importa, la opcion es un
-  JWT authorizer con Cognito.
+- **El sitio no tiene usuarios.** Cualquiera que entre por CloudFront puede
+  usarlo; el authorizer solo cierra el camino directo. Si algun dia importa
+  saber quien usa la API, la opcion es un JWT authorizer con Cognito, que
+  cambia el producto: de "pega una URL" a "crea una cuenta".
+- **El secreto esta en texto plano en la cuenta.** `NoEcho` lo muestra como `****` en
+  CloudFormation, pero no lo cifra: esta legible en la configuracion de
+  CloudFront y en las variables de entorno del authorizer para cualquiera con
+  permisos de lectura. Secrets Manager lo resolveria con costo fijo mensual.
+- **El authorizer tambien tiene log group sin retencion**, igual que la Lambda
+  principal.
 - **El sync a S3 no esta automatizado.** `sam deploy` no sube el frontend, y el
   `aws s3 sync` mas la invalidacion son pasos manuales documentados en
   "Desplegar" pero no scripteados. Un `npm run deploy` que lea los Outputs del
