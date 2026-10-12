@@ -3,13 +3,15 @@
 import { useState } from "react";
 
 /**
- * Se inyecta en tiempo de build, y por eso lleva el prefijo NEXT_PUBLIC_. En un
- * export estatico no hay servidor que lea variables de entorno en runtime: el
- * valor queda escrito dentro del bundle de JavaScript que baja el navegador.
+ * Ruta relativa, no una URL absoluta. El sitio y la API comparten dominio: el
+ * behavior /api/* de la distribucion de CloudFront enruta a API Gateway. Para
+ * el navegador es el mismo origen, asi que no hay CORS ni preflight.
  *
- * Corolario: esta URL es publica por definicion. No hay forma de esconderla.
+ * El efecto secundario es mejor que el principal: el bundle deja de contener
+ * un dominio, y por lo tanto deja de depender del ambiente donde se construyo.
+ * El mismo build sirve en cualquier despliegue.
  */
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api/resumir";
 
 interface Resumen {
   id: string;

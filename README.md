@@ -63,10 +63,10 @@ sequenceDiagram
     U->>CF: GET /
     CF-->>U: HTML y JS del export estatico de Next
 
-    U->>API: OPTIONS /resumir, el preflight de CORS
-    API-->>U: cabeceras CORS, solo el dominio de CloudFront
-    U->>API: POST /resumir con el campo url
-    Note over API: throttling de 5 rps, rechaza antes de invocar la Lambda
+    U->>CF: POST /api/resumir con el campo url
+    Note over U,CF: mismo origen que el sitio, asi que no hay preflight ni CORS
+    CF->>API: reenvia al origen api-gateway, sin reescribir el path
+    Note over API: throttling, rechaza antes de invocar la Lambda
 
     API->>L: APIGatewayProxyEventV2
     L->>L: handler.ts parsea el cuerpo, 400 si no hay url
@@ -85,7 +85,8 @@ sequenceDiagram
         L-->>API: 422 si es ErrorDeExtraccion, 500 el resto
     end
 
-    API-->>U: JSON, y la pagina muestra el resumen o el error
+    API-->>CF: JSON
+    CF-->>U: JSON, y la pagina muestra el resumen o el error
 ```
 
 ## Estructura

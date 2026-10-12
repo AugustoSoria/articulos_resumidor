@@ -53,23 +53,20 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: "$default"
-      # Sin esto el navegador nunca llega al POST: un content-type de
-      # application/json dispara antes un preflight OPTIONS, y una API con solo
-      # la ruta POST lo rechaza con 404 sin invocar la Lambda.
+      # No hay CorsConfiguration a proposito. El navegador llega a esta API por
+      # el behavior /api/* de la misma distribucion de CloudFront que sirve el
+      # sitio, asi que para el es el mismo origen: no hay preflight ni cabeceras
+      # CORS que negociar. Es la razon por la que la ruta se llama /api/resumir
+      # y no /resumir: CloudFront no reescribe rutas, el path tiene que coincidir
+      # de punta a punta.
       #
-      # El origen no esta escrito en ningun lado: CloudFormation resuelve el
-      # dominio de la distribucion al desplegar. Si algun dia se recrea, el
-      # CORS se actualiza con ella en el mismo deploy y no pueden quedar
-      # desincronizados.
-      CorsConfiguration:
-        AllowOrigins:
-          - !Sub "https://${DistribucionSitio.DomainName}"
-        AllowHeaders: ["content-type"]
-        AllowMethods: ["POST"]
+      # Efecto colateral util: el frontend usa una URL relativa, asi que el
+      # bundle deja de depender del ambiente en el que se construyo.
+      #
       # Limite duro y barato: rechaza en API Gateway, sin invocar la Lambda ni
       # gastar en Bedrock. Los budgets de AWS solo avisan, y con horas de atraso.
       RouteSettings:
-        "POST /resumir":
+        "POST /api/resumir":
           ThrottlingRateLimit: 5
           ThrottlingBurstLimit: 10
 
@@ -109,7 +106,7 @@ Resources:
           Type: HttpApi
           Properties:
             ApiId: !Ref ApiResumidor
-            Path: /resumir
+            Path: /api/resumir
             Method: POST
     Metadata:
       # Este bloque alcanza porque el parser es linkedom. Con jsdom no: hacia
@@ -171,12 +168,35 @@ Resources:
             # que el OAC reemplaza, pero CloudFormation lo sigue exigiendo.
             S3OriginConfig:
               OriginAccessIdentity: ""
+          - Id: api-gateway
+            # Solo el host: el path (/api/resumir) lo aporta el request, y
+            # CloudFront lo reenvia tal cual porque no reescribe rutas.
+            DomainName: !Sub "${ApiResumidor}.execute-api.${AWS::Region}.amazonaws.com"
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
         DefaultCacheBehavior:
           TargetOriginId: sitio-s3
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD]
           # Politica gestionada por AWS: "CachingOptimized".
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        # Todo lo que empiece con /api/ va a la API en vez de al bucket. Al
+        # compartir dominio con el sitio, el navegador lo trata como el mismo
+        # origen y CORS deja de existir para este sistema.
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: api-gateway
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            # "CachingDisabled": cada URL produce un resumen distinto, no hay
+            # nada que cachear.
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            # "AllViewerExceptHostHeader". El ExceptHost es lo importante: si
+            # CloudFront reenviara el Host del navegador -el dominio de la
+            # distribucion- API Gateway no reconoceria la API y rechazaria el
+            # request. Necesita ver su propio host.
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
         # S3 responde 403 y no 404 ante un objeto inexistente, porque no le
         # dimos s3:ListBucket: decir "no existe" filtraria que hay en el bucket.
         CustomErrorResponses:
@@ -207,8 +227,10 @@ Resources:
 
 Outputs:
   UrlApi:
-    Description: Endpoint POST para resumir un articulo
-    Value: !Sub "https://${ApiResumidor}.execute-api.${AWS::Region}.amazonaws.com/resumir"
+    Description: >-
+      Endpoint POST a traves de CloudFront. El endpoint directo de API Gateway
+      sigue existiendo y sigue siendo publico: esto no lo oculta.
+    Value: !Sub "https://${DistribucionSitio.DomainName}/api/resumir"
   NombreTabla:
     Value: !Ref TablaResumenes
   UrlSitio:

@@ -6,3 +6,6 @@ next-env.d.ts
 # Solo para desarrollo local. En produccion la URL de la API se inyecta en
 # tiempo de build desde el output del stack de CloudFormation.
 .env.local
+
+# Cache incremental de TypeScript, no va a git.
+tsconfig.tsbuildinfo
